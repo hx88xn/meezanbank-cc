@@ -1,5 +1,6 @@
 import os
 import glob
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pinecone import Pinecone
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -51,6 +52,9 @@ def get_source_category(filename: str) -> dict:
     }
 
 
+UPSERT_BATCH_SIZE = 100
+
+
 def ingest_text_file(file_path: str):
     print(f"📄 Ingesting {file_path}...")
 
@@ -72,28 +76,26 @@ def ingest_text_file(file_path: str):
     )
 
     chunks = text_splitter.split_text(text)
+    if not chunks:
+        return
+
+    all_vectors = embeddings.embed_documents(chunks)
 
     vectors = []
-    for i, chunk in enumerate(chunks):
-        doc_id = str(uuid.uuid4())
-        vector = embeddings.embed_query(chunk)
-
-        metadata = {
-            "text": chunk,
-            "category": source_info["category"],
-            "subcategory": source_info["subcategory"],
-            "source_file": source_info["source_file"],
-            "chunk_index": i,
-            "total_chunks": len(chunks)
-        }
-
+    for i, (chunk, vector) in enumerate(zip(chunks, all_vectors)):
         vectors.append({
-            "id": doc_id,
+            "id": str(uuid.uuid4()),
             "values": vector,
-            "metadata": metadata
+            "metadata": {
+                "text": chunk,
+                "category": source_info["category"],
+                "subcategory": source_info["subcategory"],
+                "source_file": source_info["source_file"],
+                "chunk_index": i,
+                "total_chunks": len(chunks)
+            }
         })
-
-        if len(vectors) >= 50:
+        if len(vectors) >= UPSERT_BATCH_SIZE:
             index.upsert(vectors=vectors, namespace=NAMESPACE)
             print(f"  ✓ Upserted batch of {len(vectors)} vectors")
             vectors = []
@@ -105,20 +107,37 @@ def ingest_text_file(file_path: str):
     print(f"✅ Completed: {file_path} ({len(chunks)} chunks)")
 
 
-def ingest_all_pages(pages_dir: str = "pages"):
-    txt_files = glob.glob(os.path.join(pages_dir, "*.txt"))
+def ingest_all_pages(pages_dir: str = "pages", parallel: int = 0):
+    paths = glob.glob(os.path.join(pages_dir, "*.txt"))
+    by_real = {}
+    for p in paths:
+        rp = os.path.realpath(p)
+        if rp not in by_real:
+            by_real[rp] = p
+    txt_files = sorted(by_real.values())
 
     if not txt_files:
         print(f"❌ No .txt files found in {pages_dir}")
         return
 
-    print(f"\n🚀 Starting ingestion of {len(txt_files)} files into namespace '{NAMESPACE}'...\n")
+    workers = min(parallel, len(txt_files)) if parallel else 1
+    print(f"\n🚀 Starting ingestion of {len(txt_files)} files into namespace '{NAMESPACE}'" + (f" ({workers} workers)" if workers > 1 else "") + "...\n")
 
-    for file_path in sorted(txt_files):
-        try:
-            ingest_text_file(file_path)
-        except Exception as e:
-            print(f"❌ Error processing {file_path}: {e}")
+    if workers <= 1:
+        for file_path in txt_files:
+            try:
+                ingest_text_file(file_path)
+            except Exception as e:
+                print(f"❌ Error processing {file_path}: {e}")
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(ingest_text_file, fp): fp for fp in txt_files}
+            for future in as_completed(futures):
+                file_path = futures[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    print(f"❌ Error processing {file_path}: {e}")
 
     print(f"\n✅ Ingestion complete! All files indexed in namespace '{NAMESPACE}'")
 
@@ -136,8 +155,15 @@ def clear_namespace():
 
 if __name__ == "__main__":
     import sys
+    import argparse
 
-    if len(sys.argv) > 1 and sys.argv[1] == "--clear":
+    parser = argparse.ArgumentParser(description="Ingest pages into Pinecone.")
+    parser.add_argument("--clear", action="store_true", help="Clear namespace before ingesting")
+    parser.add_argument("-j", "--jobs", type=int, default=0, metavar="N", help="Parallel file workers (default: 1). Use 2-4 for faster ingest if rate limits allow.")
+    parser.add_argument("pages_dir", nargs="?", default="pages", help="Directory containing .txt files (default: pages)")
+    args = parser.parse_args()
+
+    if args.clear:
         clear_namespace()
 
-    ingest_all_pages("pages")
+    ingest_all_pages(args.pages_dir, parallel=args.jobs)

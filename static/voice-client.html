@@ -530,6 +530,111 @@
         log("🎤 Microphone active");
       };
 
+      let analysisPollingInterval = null;
+
+      function renderAnalysis(data) {
+        const container = document.getElementById("analysisContent");
+        const wrap = document.getElementById("analysisContainer");
+
+        if (data.error) {
+          container.innerHTML = `<div class="text-red-600 text-sm">${data.error}</div>`;
+          wrap.classList.remove("hidden");
+          return;
+        }
+
+        function scoreBar(label, value) {
+          const num = parseInt(value) || 0;
+          const color = num >= 80 ? "bg-meezan-green" : num >= 60 ? "bg-meezan-gold" : "bg-red-500";
+          return `<div class="flex items-center gap-3 mb-2"><span class="text-xs font-medium text-gray-600 w-44 shrink-0">${label}</span><div class="flex-1 bg-gray-200 rounded-full h-2.5"><div class="${color} h-2.5 rounded-full transition-all duration-500" style="width:${num}%"></div></div><span class="text-xs font-bold text-gray-700 w-10 text-right">${value}</span></div>`;
+        }
+
+        function yesNo(label, value) {
+          const isYes = value && value.toLowerCase() === "yes";
+          return `<div class="flex items-center gap-2 mb-2"><span class="text-xs font-medium text-gray-600 w-44 shrink-0">${label}</span><span class="text-xs font-bold ${isYes ? "text-meezan-green" : "text-red-500"}">${value}</span></div>`;
+        }
+
+        function sectionTitle(title) {
+          return `<h3 class="text-sm font-bold text-gray-800 mb-3 mt-5 pb-1 border-b border-gray-200">${title}</h3>`;
+        }
+
+        let html = "";
+
+        if (data.summary) {
+          html += `<div class="bg-gradient-to-r from-purple-50 to-green-50 border border-purple-200 rounded-lg p-4 mb-4"><p class="text-sm text-gray-700 leading-relaxed">${data.summary}</p></div>`;
+        }
+
+        if (data.core_performance) {
+          html += sectionTitle("Core Performance");
+          const cp = data.core_performance;
+          html += scoreBar("Intent Recognition", cp.intent_recognition_accuracy);
+          html += scoreBar("Entity Extraction", cp.entity_extraction_accuracy);
+          html += scoreBar("Task Completion", cp.task_completion_rate);
+          html += scoreBar("Fallback Rate", cp.fallback_rate);
+          html += scoreBar("Branch Logic", cp.branch_logic_accuracy);
+        }
+
+        if (data.technical_performance) {
+          html += sectionTitle("Technical Performance");
+          const tp = data.technical_performance;
+          html += scoreBar("Response Latency", tp.response_latency);
+          html += scoreBar("Transcription Accuracy", tp.transcription_accuracy);
+          html += scoreBar("Speech Clarity", tp.speech_clarity);
+        }
+
+        if (data.conversational_quality) {
+          html += sectionTitle("Conversational Quality");
+          const cq = data.conversational_quality;
+          html += scoreBar("Interrupt Handling", cq.interrupt_handling);
+          html += scoreBar("Turn-Taking", cq.turn_taking_management);
+          html += scoreBar("Context Retention", cq.context_retention);
+          html += scoreBar("Tone Appropriateness", cq.tone_appropriateness);
+          html += scoreBar("Accent Understanding", cq.accent_understanding);
+          html += scoreBar("Disfluency Handling", cq.disfluency_handling);
+        }
+
+        if (data.compliance_and_ux) {
+          html += sectionTitle("Compliance & UX");
+          const cu = data.compliance_and_ux;
+          html += yesNo("AI Disclosure", cu.ai_disclosure);
+          html += scoreBar("Empathy Score", cu.empathy_score);
+          html += scoreBar("Confusion Rate", cu.confusion_rate);
+        }
+
+        container.innerHTML = html;
+        wrap.classList.remove("hidden");
+        wrap.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+
+      function pollForAnalysis(callId) {
+        if (analysisPollingInterval) clearInterval(analysisPollingInterval);
+        const container = document.getElementById("analysisContent");
+        const wrap = document.getElementById("analysisContainer");
+        wrap.classList.remove("hidden");
+        container.innerHTML = `<div class="flex items-center gap-3 text-sm text-gray-500"><svg class="w-5 h-5 animate-spin text-meezan-purple" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path></svg><span>Analyzing call... this may take a minute</span></div>`;
+
+        let attempts = 0;
+        const maxAttempts = 60;
+
+        analysisPollingInterval = setInterval(async () => {
+          attempts++;
+          if (attempts > maxAttempts) {
+            clearInterval(analysisPollingInterval);
+            analysisPollingInterval = null;
+            container.innerHTML = `<div class="text-sm text-gray-500">Analysis timed out. You can check back later.</div>`;
+            return;
+          }
+          try {
+            const resp = await authFetch(`/call-analysis/${callId}`);
+            if (resp.ok) {
+              clearInterval(analysisPollingInterval);
+              analysisPollingInterval = null;
+              const data = await resp.json();
+              renderAnalysis(data);
+            }
+          } catch (e) {}
+        }, 5000);
+      }
+
       stopBtn.onclick = () => {
         stopBtn.disabled = true;
         statusContainer.classList.add("hidden");
@@ -543,6 +648,7 @@
         startBtn.disabled = false;
         log("Call ended");
         stopCallTimer();
+        if (call_id) pollForAnalysis(call_id);
       };
 
       document.addEventListener("DOMContentLoaded", async () => {
